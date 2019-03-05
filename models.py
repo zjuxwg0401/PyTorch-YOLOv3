@@ -108,18 +108,28 @@ class YOLOLayer(nn.Module):
         self.num_classes = num_classes
         self.bbox_attrs = 5 + num_classes
         self.image_dim = img_dim
-        self.ignore_thres = 0.5
-        self.lambda_coord = 1
 
-        self.mse_loss = nn.MSELoss(size_average=True)  # Coordinate loss
+        self.ignore_thres = 0.5  #这个是啥意思？
+
+        self.lambda_coord = 1  #这个是坐标loss函数的权重吗？
+
+        self.mse_loss = nn.MSELoss(reduction='elementwise_mean')  # Coordinate loss
+        self.bce_loss = nn.BCELoss(reduction='elementwise_mean')  # Confidence loss 明天查一下，这是什么loss
+
+        '''
+        self.mse_loss = nn.MSELoss(size_average=True)  # Coordinate loss  size_average弃用了
         self.bce_loss = nn.BCELoss(size_average=True)  # Confidence loss
+        '''
+
         self.ce_loss = nn.CrossEntropyLoss()  # Class loss
 
+
+    #前向传播
     def forward(self, x, targets=None):
-        nA = self.num_anchors
-        nB = x.size(0)
+        nA = self.num_anchors # 锚点的个数
+        nB = x.size(0)        # Batch ??
         nG = x.size(2)
-        stride = self.image_dim / nG
+        stride = self.image_dim / nG #由此推断片，
 
         # Tensors for cuda support
         FloatTensor = torch.cuda.FloatTensor if x.is_cuda else torch.FloatTensor
@@ -232,18 +242,19 @@ class Darknet(nn.Module):
 
     def __init__(self, config_path, img_size=416):
         super(Darknet, self).__init__()
-        self.module_defs = parse_model_config(config_path)
-        self.hyperparams, self.module_list = create_modules(self.module_defs)
+        self.module_defs = parse_model_config(config_path) # 对cfg文件进行解析
+        self.hyperparams, self.module_list = create_modules(self.module_defs) #读取net信息，及构造网络结构
         self.img_size = img_size
         self.seen = 0
         self.header_info = np.array([0, 0, 0, self.seen, 0])
         self.loss_names = ["x", "y", "w", "h", "conf", "cls", "recall", "precision"]
 
     def forward(self, x, targets=None):
+
         is_training = targets is not None
         output = []
         self.losses = defaultdict(float)
-        layer_outputs = []
+        layer_outputs = [] # for route layer or short cut
         for i, (module_def, module) in enumerate(zip(self.module_defs, self.module_list)):
             if module_def["type"] in ["convolutional", "upsample", "maxpool"]:
                 x = module(x)
@@ -263,29 +274,30 @@ class Darknet(nn.Module):
                 else:
                     x = module(x)
                 output.append(x)
-            layer_outputs.append(x)
+            layer_outputs.append(x) # for route and shortcut
 
-        self.losses["recall"] /= 3
+        self.losses["recall"] /= 3  # why??? For the three yolo layers?
         self.losses["precision"] /= 3
-        return sum(output) if is_training else torch.cat(output, 1)
+        return sum(output) if is_training else torch.cat(output, 1)  # 不懂？
 
     def load_weights(self, weights_path):
         """Parses and loads the weights stored in 'weights_path'"""
 
         # Open the weights file
         fp = open(weights_path, "rb")
-        header = np.fromfile(fp, dtype=np.int32, count=5)  # First five are header values
+        header = np.fromfile(fp, dtype=np.int32, count=5)  # First five are header values, int32 type
 
         # Needed to write header when saving weights
         self.header_info = header
 
-        self.seen = header[3]
+        self.seen = header[3] #训练过的图像数目
         weights = np.fromfile(fp, dtype=np.float32)  # The rest are weights
         fp.close()
 
         ptr = 0
         for i, (module_def, module) in enumerate(zip(self.module_defs, self.module_list)):
             if module_def["type"] == "convolutional":
+                # module[0],[1],[2]分别是 conv bn leakyrelu
                 conv_layer = module[0]
                 if module_def["batch_normalize"]:
                     # Load BN bias, weights, running mean and running variance

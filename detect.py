@@ -19,6 +19,10 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.ticker import NullLocator
 
+
+# 没有用opencv吗？？？
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--image_folder', type=str, default='data/samples', help='path to dataset')
 parser.add_argument('--config_path', type=str, default='config/yolov3.cfg', help='path to model config file')
@@ -35,16 +39,18 @@ print(opt)
 
 cuda = torch.cuda.is_available() and opt.use_cuda
 
-os.makedirs('output', exist_ok=True)
+os.makedirs('output', exist_ok=True)  #新建输出文件夹
 
 # Set up model
-model = Darknet(opt.config_path, img_size=opt.img_size)
+# config_path='config/yolov3.cfg'
+# img_size = 416
+model = Darknet(opt.config_path, img_size=opt.img_size) # --config_path', type=str, default='config/yolov3.cfg'
 model.load_weights(opt.weights_path)
 
 if cuda:
     model.cuda()
 
-model.eval() # Set in evaluation mode
+model.eval() # Set in evaluation mode 设置成测试模式
 
 dataloader = DataLoader(ImageFolder(opt.image_folder, img_size=opt.img_size),
                         batch_size=opt.batch_size, shuffle=False, num_workers=opt.n_cpu)
@@ -57,7 +63,7 @@ imgs = []           # Stores image paths
 img_detections = [] # Stores detections for each image index
 
 print ('\nPerforming object detection:')
-prev_time = time.time()
+prev_time = time.time() #计时开始，包括读图的时间吗？
 for batch_i, (img_paths, input_imgs) in enumerate(dataloader):
     # Configure input
     input_imgs = Variable(input_imgs.type(Tensor))
@@ -95,6 +101,7 @@ for img_i, (path, detections) in enumerate(zip(imgs, img_detections)):
     ax.imshow(img)
 
     # The amount of padding that was added
+    # In dataload, the long side of the image is resized at 416, the aspect ratio didn't change, so we need to padding the short side dimension.
     pad_x = max(img.shape[0] - img.shape[1], 0) * (opt.img_size / max(img.shape))
     pad_y = max(img.shape[1] - img.shape[0], 0) * (opt.img_size / max(img.shape))
     # Image height and width after padding is removed

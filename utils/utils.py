@@ -63,6 +63,7 @@ def bbox_iou(box1, box2, x1y1x2y2=True):
     """
     if not x1y1x2y2:
         # Transform from center and width to exact coordinates
+        # 由中心点+长宽形式转化成对角点形式
         b1_x1, b1_x2 = box1[:, 0] - box1[:, 2] / 2, box1[:, 0] + box1[:, 2] / 2
         b1_y1, b1_y2 = box1[:, 1] - box1[:, 3] / 2, box1[:, 1] + box1[:, 3] / 2
         b2_x1, b2_x2 = box2[:, 0] - box2[:, 2] / 2, box2[:, 0] + box2[:, 2] / 2
@@ -78,11 +79,10 @@ def bbox_iou(box1, box2, x1y1x2y2=True):
     inter_rect_x2 = torch.min(b1_x2, b2_x2)
     inter_rect_y2 = torch.min(b1_y2, b2_y2)
     # Intersection area
-    inter_area = torch.clamp(inter_rect_x2 - inter_rect_x1 + 1, min=0) * torch.clamp(
-        inter_rect_y2 - inter_rect_y1 + 1, min=0
-    )
+    inter_area = torch.clamp(inter_rect_x2 - inter_rect_x1 + 1, min=0) * torch.clamp(inter_rect_y2 - inter_rect_y1 + 1, min=0)
+    # torch.clamp(input, min, max out=None)  #返回 input<min,则返回min, input>max,则返回max,其余返回input
     # Union Area
-    b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
+    b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1) #为什么都要加一呀
     b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
 
     iou = inter_area / (b1_area + b2_area - inter_area + 1e-16)
@@ -134,14 +134,15 @@ def non_max_suppression(prediction, num_classes, conf_thres=0.5, nms_thres=0.4):
 
     # From (center x, center y, width, height) to (x1, y1, x2, y2)
     box_corner = prediction.new(prediction.shape)
-    box_corner[:, :, 0] = prediction[:, :, 0] - prediction[:, :, 2] / 2
-    box_corner[:, :, 1] = prediction[:, :, 1] - prediction[:, :, 3] / 2
-    box_corner[:, :, 2] = prediction[:, :, 0] + prediction[:, :, 2] / 2
-    box_corner[:, :, 3] = prediction[:, :, 1] + prediction[:, :, 3] / 2
-    prediction[:, :, :4] = box_corner[:, :, :4]
+    box_corner[:, :, 0] = prediction[:, :, 0] - prediction[:, :, 2] / 2 # the left-top x
+    box_corner[:, :, 1] = prediction[:, :, 1] - prediction[:, :, 3] / 2 # the left-top y
+    box_corner[:, :, 2] = prediction[:, :, 0] + prediction[:, :, 2] / 2 # the right-bottom x
+    box_corner[:, :, 3] = prediction[:, :, 1] + prediction[:, :, 3] / 2 # the right-bottom y
+    prediction[:, :, :4] = box_corner[:, :, :4] # 为什么不直接在本身上迭代，浪费内存
 
-    output = [None for _ in range(len(prediction))]
+    output = [None for _ in range(len(prediction))]   # output = [None, None,...,None]  batch个None
     for image_i, image_pred in enumerate(prediction):
+        # get a [10647,85] tensor once a time
         # Filter out confidence scores below threshold
         conf_mask = (image_pred[:, 4] >= conf_thres).squeeze()
         image_pred = image_pred[conf_mask]
@@ -153,7 +154,7 @@ def non_max_suppression(prediction, num_classes, conf_thres=0.5, nms_thres=0.4):
         # Detections ordered as (x1, y1, x2, y2, obj_conf, class_conf, class_pred)
         detections = torch.cat((image_pred[:, :5], class_conf.float(), class_pred.float()), 1)
         # Iterate through all predicted classes
-        unique_labels = detections[:, -1].cpu().unique()
+        unique_labels = detections[:, -1].cpu().unique() #返回一个无重复的列表，与集合类似
         if prediction.is_cuda:
             unique_labels = unique_labels.cuda()
         for c in unique_labels:
@@ -161,7 +162,7 @@ def non_max_suppression(prediction, num_classes, conf_thres=0.5, nms_thres=0.4):
             detections_class = detections[detections[:, -1] == c]
             # Sort the detections by maximum objectness confidence
             _, conf_sort_index = torch.sort(detections_class[:, 4], descending=True)
-            detections_class = detections_class[conf_sort_index]
+            detections_class = detections_class[conf_sort_index] #按confidence降序排列
             # Perform non-maximum suppression
             max_detections = []
             while detections_class.size(0):
@@ -169,7 +170,7 @@ def non_max_suppression(prediction, num_classes, conf_thres=0.5, nms_thres=0.4):
                 max_detections.append(detections_class[0].unsqueeze(0))
                 # Stop if we're at the last detection
                 if len(detections_class) == 1:
-                    break
+                    break # break when there is only one box
                 # Get the IOUs for all boxes with lower confidence
                 ious = bbox_iou(max_detections[-1], detections_class[1:])
                 # Remove detections with IoU >= NMS threshold
