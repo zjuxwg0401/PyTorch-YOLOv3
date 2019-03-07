@@ -185,6 +185,7 @@ def non_max_suppression(prediction, num_classes, conf_thres=0.5, nms_thres=0.4):
     return output
 
 
+# 这个function是为了建立与输出匹配的格式化的标签
 def build_targets(
     pred_boxes, pred_conf, pred_cls, target, anchors, num_anchors, num_classes, grid_size, ignore_thres, img_dim
 ):
@@ -192,7 +193,7 @@ def build_targets(
     nA = num_anchors
     nC = num_classes
     nG = grid_size
-    mask = torch.zeros(nB, nA, nG, nG)
+    mask = torch.zeros(nB, nA, nG, nG) # batch， achor， grid ,grid
     conf_mask = torch.ones(nB, nA, nG, nG)
     tx = torch.zeros(nB, nA, nG, nG)
     ty = torch.zeros(nB, nA, nG, nG)
@@ -207,49 +208,81 @@ def build_targets(
         for t in range(target.shape[1]):
             if target[b, t].sum() == 0:
                 continue
-            nGT += 1
+            nGT += 1 # record the number of gt box
             # Convert to position relative to box
-            gx = target[b, t, 1] * nG
+            gx = target[b, t, 1] * nG  #为啥要乘以格数呀？因为原始标注为整幅图长宽的百分比
             gy = target[b, t, 2] * nG
             gw = target[b, t, 3] * nG
             gh = target[b, t, 4] * nG
             # Get grid box indices
+            # 确定用哪个cell中的anchor去预测目标
             gi = int(gx)
             gj = int(gy)
             # Get shape of gt box
-            gt_box = torch.FloatTensor(np.array([0, 0, gw, gh])).unsqueeze(0)
+            gt_box = torch.FloatTensor(np.array([0, 0, gw, gh])).unsqueeze(0) #加unsqueeze（0）是为了加batch那一维，不过这个0，0是什么意思？
             # Get shape of anchor box
-            anchor_shapes = torch.FloatTensor(np.concatenate((np.zeros((len(anchors), 2)), np.array(anchors)), 1))
+            anchor_shapes = torch.FloatTensor(np.concatenate((np.zeros((len(anchors), 2)), np.array(anchors)), 1)) #anchor的一二维也是0，0，是使它们和真实框的中心对齐呀
             # Calculate iou between gt and anchor shapes
             anch_ious = bbox_iou(gt_box, anchor_shapes)
             # Where the overlap is larger than threshold set mask to zero (ignore)
             conf_mask[b, anch_ious > ignore_thres, gj, gi] = 0
+            # 本来是1，anch_ious > ignore_thres是什么意思，有什么用吗，不应该是越大越好吗？难点就是这是一句，等等再看看。
+            # 这个ignore_threshold是指iou超过这个的不设为负样本，以减少正负样本间的不平衡。
             # Find the best matching anchor box
+            # 找到最合适的anchor box
+
             best_n = np.argmax(anch_ious)
             # Get ground truth box
-            gt_box = torch.FloatTensor(np.array([gx, gy, gw, gh])).unsqueeze(0)
+            gt_box = torch.FloatTensor(np.array([gx, gy, gw, gh])).unsqueeze(0) #真实框左上角值，加长宽，加unsqueeze（0）是为了加batch那一维
             # Get the best prediction
             pred_box = pred_boxes[b, best_n, gj, gi].unsqueeze(0)
             # Masks
-            mask[b, best_n, gj, gi] = 1
-            conf_mask[b, best_n, gj, gi] = 1
+            '''
+            mask = torch.zeros(nB, nA, nG, nG) # batch， achor， grid ,grid
+            conf_mask = torch.ones(nB, nA, nG, nG)
+            '''
+            mask[b, best_n, gj, gi] = 1        #本来是0，表示负样本，变成1即为正样本
+            conf_mask[b, best_n, gj, gi] = 1   #本来是1，后来如果变成0了，就是正样本，这里又变成1是什么情况！！！
             # Coordinates
-            tx[b, best_n, gj, gi] = gx - gi
-            ty[b, best_n, gj, gi] = gy - gj
+            '''
+            bx = sigmoid(tx) + cx
+            by = sigmoid(ty) + cy
+            bw = pw exp(tw)
+            bh = ph exp(th)
+            
+            bx, by, bw, bh are the x,y center co-ordinates, width and height of our prediction. tx, ty, tw, th is what the network outputs. 
+            cx and cy are the top-left co-ordinates of the grid. pw and ph are anchors dimensions for the box.
+            
+            '''
+            tx[b, best_n, gj, gi] = gx - gi  # bx - cx
+            ty[b, best_n, gj, gi] = gy - gj  # by - cy
             # Width and height
-            tw[b, best_n, gj, gi] = math.log(gw / anchors[best_n][0] + 1e-16)
-            th[b, best_n, gj, gi] = math.log(gh / anchors[best_n][1] + 1e-16)
+            tw[b, best_n, gj, gi] = math.log(gw / anchors[best_n][0] + 1e-16)  # tw = log(bw/(pw+0.00000000000000000001))
+            th[b, best_n, gj, gi] = math.log(gh / anchors[best_n][1] + 1e-16)  # 同理
             # One-hot encoding of label
-            target_label = int(target[b, t, 0])
-            tcls[b, best_n, gj, gi, target_label] = 1
+            target_label = int(target[b, t, 0])   # class的种类index
+            tcls[b, best_n, gj, gi, target_label] = 1  # 对应位置填1
             tconf[b, best_n, gj, gi] = 1
 
             # Calculate iou between ground truth and best matching prediction
-            iou = bbox_iou(gt_box, pred_box, x1y1x2y2=False)
+            iou = bbox_iou(gt_box, pred_box, x1y1x2y2=False) # gt_box 和 pred_box的形式均为[x_c,y_c,w,h]
             pred_label = torch.argmax(pred_cls[b, best_n, gj, gi])
             score = pred_conf[b, best_n, gj, gi]
             if iou > 0.5 and pred_label == target_label and score > 0.5:
+                # 判断为真的标准还挺高，iou要大于0.5，标签一致，objectness score大于0.5
                 nCorrect += 1
+
+
+            '''
+            nGT:真实的框的数量
+            nCorrect：正确预测框的数量
+            mask：
+            conf_mask：
+            tx, ty, tw, th: [nB, nA, nG, nG]
+            tconf:  [nB, nA, nG, nG]
+            tcls ： [nB, nA, nG, nG, nC]
+            '''
+
 
     return nGT, nCorrect, mask, conf_mask, tx, ty, tw, th, tconf, tcls
 
@@ -257,3 +290,6 @@ def build_targets(
 def to_categorical(y, num_classes):
     """ 1-hot encodes a tensor """
     return torch.from_numpy(np.eye(num_classes, dtype="uint8")[y])
+
+
+

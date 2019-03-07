@@ -16,6 +16,29 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
 
+'''
+这个文件里有
+    def create_modules(module_defs):
+    class EmptyLayer(nn.Module):
+    class YOLOLayer(nn.Module):
+        def __init__(self, anchors, num_classes, img_dim):
+        def forward(self, x, targets=None): 
+    class Darknet(nn.Module):
+        def __init__(self, config_path, img_size=416):
+        def forward(self, x, targets=None):  # 这是总的前向过程
+        def load_weights(self, weights_path):
+        def save_weights(self, path, cutoff=-1)
+        
+Darknet类是入口，其初始化类会调用create_modules(module_defs)，YOLOLayer(nn.Module):等
+调用关系怎么画比较好
+'''
+
+
+
+
+
+
+
 def create_modules(module_defs):
     """
     Constructs module list of layer blocks from module configuration in module_defs
@@ -61,6 +84,8 @@ def create_modules(module_defs):
             modules.add_module("maxpool_%d" % i, maxpool)
 
         elif module_def["type"] == "upsample":
+            # torch.nn.functional.upsample(input, size=None, scale_factor=None, mode='nearest', align_corners=None
+            #upsample = nn.functional.interpolate(scale_factor=int(module_def["stride"]), mode="nearest")
             upsample = nn.Upsample(scale_factor=int(module_def["stride"]), mode="nearest")
             modules.add_module("upsample_%d" % i, upsample)
 
@@ -102,26 +127,23 @@ class YOLOLayer(nn.Module):
     """Detection layer"""
 
     def __init__(self, anchors, num_classes, img_dim):
-        super(YOLOLayer, self).__init__()
+        super(YOLOLayer, self).__init__() #调用父类的构造函数
         self.anchors = anchors
         self.num_anchors = len(anchors)
         self.num_classes = num_classes
-        self.bbox_attrs = 5 + num_classes
-        self.image_dim = img_dim
-
+        self.bbox_attrs = 5 + num_classes  #x,y,w,h (x1,y1,x2,y2) + 类别数
+        self.image_dim = img_dim           # 因为图像的长等于宽，所以一样，img_height
         self.ignore_thres = 0.5  #这个是啥意思？
-
         self.lambda_coord = 1  #这个是坐标loss函数的权重吗？
-
         self.mse_loss = nn.MSELoss(reduction='elementwise_mean')  # Coordinate loss
         self.bce_loss = nn.BCELoss(reduction='elementwise_mean')  # Confidence loss 明天查一下，这是什么loss
-
+        self.ce_loss = nn.CrossEntropyLoss()  # Class loss
         '''
         self.mse_loss = nn.MSELoss(size_average=True)  # Coordinate loss  size_average弃用了
         self.bce_loss = nn.BCELoss(size_average=True)  # Confidence loss
         '''
 
-        self.ce_loss = nn.CrossEntropyLoss()  # Class loss
+
 
 
     #前向传播
@@ -129,7 +151,7 @@ class YOLOLayer(nn.Module):
         nA = self.num_anchors # 锚点的个数
         nB = x.size(0)        # Batch ??
         nG = x.size(2)
-        stride = self.image_dim / nG #由此推断片，
+        stride = self.image_dim / nG #
 
         # Tensors for cuda support
         FloatTensor = torch.cuda.FloatTensor if x.is_cuda else torch.FloatTensor
@@ -155,7 +177,7 @@ class YOLOLayer(nn.Module):
 
         # Add offset and scale with anchors
         pred_boxes = FloatTensor(prediction[..., :4].shape)
-        pred_boxes[..., 0] = x.data + grid_x
+        pred_boxes[..., 0] = x.data + grid_x   #加上网格后才是真实位置
         pred_boxes[..., 1] = y.data + grid_y
         pred_boxes[..., 2] = torch.exp(w.data) * anchor_w
         pred_boxes[..., 3] = torch.exp(h.data) * anchor_h
@@ -167,6 +189,7 @@ class YOLOLayer(nn.Module):
                 self.mse_loss = self.mse_loss.cuda()
                 self.bce_loss = self.bce_loss.cuda()
                 self.ce_loss = self.ce_loss.cuda()
+
 
             nGT, nCorrect, mask, conf_mask, tx, ty, tw, th, tconf, tcls = build_targets(
                 pred_boxes=pred_boxes.cpu().data,
@@ -181,9 +204,19 @@ class YOLOLayer(nn.Module):
                 img_dim=self.image_dim,
             )
 
-            nProposals = int((pred_conf > 0.5).sum().item())
-            recall = float(nCorrect / nGT) if nGT else 1
-            precision = float(nCorrect / nProposals)
+            '''
+            nGT:真实的框的数量
+            nCorrect：正确预测框的数量
+            mask：[nB, nA, nG, nG]
+            conf_mask：[nB, nA, nG, nG]
+            tx, ty, tw, th: [nB, nA, nG, nG]
+            tconf:  [nB, nA, nG, nG]
+            tcls ： [nB, nA, nG, nG, nC]
+            '''
+
+            nProposals = int((pred_conf > 0.5).sum().item()) # 注意，这是第一个yolo layer中object score大于0.5，即可能有目标的框
+            recall = float(nCorrect / nGT) if nGT else 1 #召回率 = 正确/真实框的总数
+            precision = float(nCorrect / nProposals) #准确率 = 正确的个数/检测出来的总框数，但是这个nProposals只是有物体而已呀，并不是某种目标的框数，算的是总的吗？
 
             # Handle masks
             mask = Variable(mask.type(ByteTensor))
@@ -197,6 +230,8 @@ class YOLOLayer(nn.Module):
             tconf = Variable(tconf.type(FloatTensor), requires_grad=False)
             tcls = Variable(tcls.type(LongTensor), requires_grad=False)
 
+            # in pytorch 1.0, Variable has been depetched
+
             # Get conf mask where gt and where there is no gt
             conf_mask_true = mask
             conf_mask_false = conf_mask - mask
@@ -206,10 +241,14 @@ class YOLOLayer(nn.Module):
             loss_y = self.mse_loss(y[mask], ty[mask])
             loss_w = self.mse_loss(w[mask], tw[mask])
             loss_h = self.mse_loss(h[mask], th[mask])
-            loss_conf = self.bce_loss(pred_conf[conf_mask_false], tconf[conf_mask_false]) + self.bce_loss(
-                pred_conf[conf_mask_true], tconf[conf_mask_true]
-            )
+
+
+            loss_conf = self.bce_loss(pred_conf[conf_mask_false], tconf[conf_mask_false]) + self.bce_loss(pred_conf[conf_mask_true], tconf[conf_mask_true])
+
+
             loss_cls = (1 / nB) * self.ce_loss(pred_cls[mask], torch.argmax(tcls[mask], 1))
+
+
             loss = loss_x + loss_y + loss_w + loss_h + loss_conf + loss_cls
 
             return (
@@ -249,7 +288,7 @@ class Darknet(nn.Module):
         self.header_info = np.array([0, 0, 0, self.seen, 0])
         self.loss_names = ["x", "y", "w", "h", "conf", "cls", "recall", "precision"]
 
-    def forward(self, x, targets=None):
+    def forward(self, x, targets=None):  # 这是总的前向过程
 
         is_training = targets is not None
         output = []
@@ -269,8 +308,11 @@ class Darknet(nn.Module):
                 if is_training:
                     x, *losses = module[0](x, targets)
                     for name, loss in zip(self.loss_names, losses):
+
                         self.losses[name] += loss
+
                 # Test phase: Get detections
+
                 else:
                     x = module(x)
                 output.append(x)
